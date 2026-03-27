@@ -1,4 +1,4 @@
-# RF-DETR Pipeline for 2603 Tester Model2
+# RF-DETR Pipeline for PET inspection Pipeline
 
 This project builds a training dataset from:
 - `Dataset-v3.v1i.yolov5pytorch/train/images`
