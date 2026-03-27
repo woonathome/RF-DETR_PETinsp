@@ -6,12 +6,14 @@ This project builds a training dataset from:
 
 Workflow:
 1. Resize full images from `2046x2046` to `2048x2048`
-2. Tile to `8x8` (`256x256`)
+2. Filename rule relabel to `unknown`:
+   - `color-distribution`, `gasbubble`, `airbubble` labels become `unknown` when filename does not contain `colordistribution`, `gas`, `air`
 3. For `pockmark`, compute contrast = `|mean(inner bbox) - mean(outer 2px ring)|`
-4. Keep top 10% pockmark boxes as `pockmark`, relabel remaining as class `8` (`pockmark_unstable`)
-5. Keep defect tiles only by default
-6. Create COCO splits (`train/valid/test`)
-7. Train RF-DETR
+4. Keep top 20% pockmark boxes as `pockmark`, relabel remaining as `unknown`
+5. Save refined secondary YOLO dataset
+6. Tile to `8x8` (`256x256`)
+7. Create COCO splits (`train/valid/test`)
+8. Train RF-DETR
 
 ## 1) Install
 
@@ -26,10 +28,13 @@ python scripts/prepare_tiled_coco_dataset.py ^
   --source-root ./Dataset-v3.v1i.yolov5pytorch ^
   --images-subdir train/images ^
   --labels-subdir train/labels ^
+  --secondary-root ./data/dataset_stage2_refined ^
   --output-root ./data/rfdetr_tiled_coco ^
   --val-ratio 0.15 ^
   --test-ratio 0.10 ^
   --split-strategy dominant_class ^
+  --pockmark-top-percent 0.20 ^
+  --pockmark-border-px 2 ^
   --seed 42 ^
   --overwrite
 ```
@@ -37,11 +42,7 @@ python scripts/prepare_tiled_coco_dataset.py ^
 Notes:
 - `split-strategy=dominant_class` keeps split ratios per dominant-class stratum.
 - This is used to keep train/valid/test ratio behavior consistent across subgroups.
-- New pockmark filter options (defaults shown):
-  - `--pockmark-class-id` (auto detect from `data.yaml`, fallback to class `5`)
-  - `--pockmark-unstable-class-id 8`
-  - `--pockmark-top-percent 0.10`
-  - `--pockmark-border-px 2`
+- Secondary refined YOLO dataset is saved at `--secondary-root` (step-4 artifact).
 
 ## 3) Train
 
@@ -58,7 +59,7 @@ python scripts/train_rfdetr.py ^
   --tensorboard
 ```
 
-Train only 7 classes (exclude `pockmark_unstable`, `unknown`):
+Train only 7 classes (exclude `unknown`):
 
 ```bash
 python scripts/train_rfdetr.py ^
@@ -70,7 +71,7 @@ python scripts/train_rfdetr.py ^
   --grad-accum-steps 2 ^
   --num-workers 8 ^
   --lr 1e-4 ^
-  --exclude-classes pockmark_unstable unknown ^
+  --exclude-classes unknown ^
   --tensorboard
 ```
 
@@ -82,16 +83,58 @@ python scripts/train_rfdetr.py ... --include-classes airbubble blackspot color-d
 
 ## 4) Resume
 
-Auto latest checkpoint in output dir:
+`last` checkpoint is now saved every epoch as:
+- `checkpoint_last.ckpt`
+
+Auto resume (prefers `checkpoint_last.ckpt`):
 
 ```bash
-python scripts/train_rfdetr.py ... --resume
+python scripts/train_rfdetr.py ^
+  --dataset-dir ./data/rfdetr_tiled_coco ^
+  --output-dir ./runs/rfdetr-medium-7cls ^
+  --model-size medium ^
+  --epochs 100 ^
+  --batch-size 8 ^
+  --grad-accum-steps 2 ^
+  --num-workers 8 ^
+  --lr 1e-4 ^
+  --exclude-classes unknown ^
+  --resume ^
+  --tensorboard
+```
+
+Resume from best total checkpoint:
+
+```bash
+python scripts/train_rfdetr.py ^
+  --dataset-dir ./data/rfdetr_tiled_coco ^
+  --output-dir ./runs/rfdetr-medium-7cls ^
+  --model-size medium ^
+  --epochs 100 ^
+  --batch-size 8 ^
+  --grad-accum-steps 2 ^
+  --num-workers 8 ^
+  --lr 1e-4 ^
+  --exclude-classes unknown ^
+  --resume-best ^
+  --tensorboard
 ```
 
 From specific checkpoint:
 
 ```bash
-python scripts/train_rfdetr.py ... --resume-from ./runs/rfdetr-medium/checkpoint_best_total.pth
+python scripts/train_rfdetr.py ^
+  --dataset-dir ./data/rfdetr_tiled_coco ^
+  --output-dir ./runs/rfdetr-medium-7cls ^
+  --model-size medium ^
+  --epochs 100 ^
+  --batch-size 8 ^
+  --grad-accum-steps 2 ^
+  --num-workers 8 ^
+  --lr 1e-4 ^
+  --exclude-classes unknown ^
+  --resume-from ./runs/rfdetr-medium-7cls/checkpoint_best_total.pth ^
+  --tensorboard
 ```
 
 ## 5) Check broken images if DataLoader fails

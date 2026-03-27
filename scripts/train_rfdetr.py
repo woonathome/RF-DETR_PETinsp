@@ -64,6 +64,11 @@ def parse_args() -> argparse.Namespace:
         help="Resume training from the latest checkpoint in output_dir.",
     )
     parser.add_argument(
+        "--resume-best",
+        action="store_true",
+        help="Resume from output_dir/checkpoint_best_total.pth if it exists.",
+    )
+    parser.add_argument(
         "--resume-from",
         type=Path,
         default=None,
@@ -365,6 +370,7 @@ def resolve_resume_path(
     output_dir: Path,
     do_resume: bool,
     resume_from: Path | None = None,
+    resume_best: bool = False,
 ) -> str | None:
     if resume_from is not None:
         resolved = resume_from.resolve()
@@ -373,8 +379,41 @@ def resolve_resume_path(
         print(f"Resume checkpoint selected (--resume-from): {resolved}")
         return str(resolved)
 
-    if not do_resume:
+    if resume_best:
+        best_total = output_dir / "checkpoint_best_total.pth"
+        if best_total.exists():
+            chosen = best_total.resolve()
+            print(f"Resume checkpoint selected (--resume-best): {chosen}")
+            return str(chosen)
+
+        best_candidates = sorted(
+            [
+                p
+                for p in output_dir.glob("checkpoint_best*.pth")
+                if p.is_file()
+            ],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if best_candidates:
+            chosen = best_candidates[0].resolve()
+            print(f"Resume checkpoint selected (--resume-best fallback): {chosen}")
+            return str(chosen)
+
+        print(
+            f"Warning: --resume-best was set but no best checkpoint was found in {output_dir}. "
+            "Falling back to --resume behavior if enabled."
+        )
+
+    if not do_resume and not resume_best:
         return None
+
+    for preferred in ("checkpoint_last.ckpt", "checkpoint_last.pth"):
+        p = output_dir / preferred
+        if p.exists():
+            chosen = p.resolve()
+            print(f"Resume checkpoint selected (preferred last): {chosen}")
+            return str(chosen)
 
     candidates = sorted(
         [
@@ -391,7 +430,7 @@ def resolve_resume_path(
         return str(chosen)
 
     print(
-        f"Warning: --resume was set but no checkpoint file was found in {output_dir}. "
+        f"Warning: resume was requested but no checkpoint file was found in {output_dir}. "
         "Starting from scratch."
     )
     return None
@@ -450,7 +489,12 @@ def run_high_level_train(
         "tensorboard": args.tensorboard,
         "aug_config": {} if args.disable_augment else aug_config,
     }
-    resume_path = resolve_resume_path(output_dir, args.resume, args.resume_from)
+    resume_path = resolve_resume_path(
+        output_dir=output_dir,
+        do_resume=args.resume,
+        resume_from=args.resume_from,
+        resume_best=args.resume_best,
+    )
     if resume_path:
         requested_train_kwargs["resume"] = resume_path
 
@@ -612,7 +656,12 @@ def main() -> None:
         }
     model_config = model_config_cls(**model_config_kwargs)
 
-    resume_for_config = resolve_resume_path(output_dir, args.resume, args.resume_from)
+    resume_for_config = resolve_resume_path(
+        output_dir=output_dir,
+        do_resume=args.resume,
+        resume_from=args.resume_from,
+        resume_best=args.resume_best,
+    )
 
     train_config_kwargs = {
         "dataset_dir": str(dataset_dir),
@@ -649,6 +698,31 @@ def main() -> None:
         from pytorch_lightning import Callback
     except Exception:
         from lightning.pytorch.callbacks import Callback  # type: ignore
+
+    class LastCheckpointSaver(Callback):
+        """
+        Save a rolling 'last' checkpoint every validation epoch.
+        """
+
+        def __init__(self, output_dir: Path) -> None:
+            super().__init__()
+            self.output_dir = Path(output_dir)
+            self.ckpt_path = self.output_dir / "checkpoint_last.ckpt"
+
+        def _save(self, trainer) -> None:
+            if getattr(trainer, "is_global_zero", True) is False:
+                return
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            trainer.save_checkpoint(str(self.ckpt_path), weights_only=False)
+            print(f"[Checkpoint] saved last: {self.ckpt_path}")
+
+        def on_validation_epoch_end(self, trainer, pl_module) -> None:
+            if getattr(trainer, "sanity_checking", False):
+                return
+            self._save(trainer)
+
+        def on_exception(self, trainer, pl_module, exception) -> None:
+            self._save(trainer)
 
     class EpochMetricsPrinter(Callback):
         def __init__(self) -> None:
@@ -716,6 +790,7 @@ def main() -> None:
     trainer = build_trainer(train_config, model_config)
     trainer.callbacks.extend(
         [
+            LastCheckpointSaver(output_dir=output_dir),
             EpochAugmentationSeedCallback(base_seed=args.seed),
             EpochMetricsPrinter(),
         ]
@@ -737,6 +812,8 @@ def main() -> None:
     print(f"  progress_bar: {None if args.no_progress_bar else 'tqdm'}")
     print(f"  seed(base): {args.seed}")
     print(f"  augmentation: {'disabled' if args.disable_augment else 'enabled'}")
+    print(f"  resume: {args.resume}")
+    print(f"  resume_best: {args.resume_best}")
 
     trainer.fit(module, datamodule, ckpt_path=getattr(train_config, "resume", None) or None)
 
